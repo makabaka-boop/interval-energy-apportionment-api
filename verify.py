@@ -171,7 +171,122 @@ def main() -> int:
         first.status_code == 200 and first.content == second.content,
     )
 
-    # 6. Rejections carry field-locatable errors and no partial results.
+    # 6. Branch detail: every interval's allocated amount is conserved by the
+    #    second-level per-branch split (exact full-body comparison).
+    response = post({**payload, "detail_level": "branch"})
+    check("branch detail returns 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        check(
+            "branch allocations conserve each interval's allocated amount",
+            response.json()
+            == {
+                "meter_increment": "10.000",
+                "branch_total": "8.000",
+                "difference": "2.000",
+                "check_sum": "2.000",
+                "allocations": [
+                    {
+                        "interval": "I1",
+                        "branch_total": "4.000",
+                        "allocated": "1.000",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "3.000",
+                             "adjustment": "0.750", "adjusted_energy": "3.750"},
+                            {"branch": "B2", "energy": "1.000",
+                             "adjustment": "0.250", "adjusted_energy": "1.250"},
+                        ],
+                    },
+                    {
+                        "interval": "I2",
+                        "branch_total": "3.500",
+                        "allocated": "0.875",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "2.000",
+                             "adjustment": "0.500", "adjusted_energy": "2.500"},
+                            {"branch": "B2", "energy": "1.500",
+                             "adjustment": "0.375", "adjusted_energy": "1.875"},
+                        ],
+                    },
+                    {
+                        "interval": "I3",
+                        "branch_total": "0.500",
+                        "allocated": "0.125",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "0.500",
+                             "adjustment": "0.125", "adjusted_energy": "0.625"},
+                            {"branch": "B2", "energy": "0.000",
+                             "adjustment": "0.000", "adjusted_energy": "0.000"},
+                        ],
+                    },
+                ],
+            },
+            response.text,
+        )
+
+    # 7. Negative difference with tied branches: the leftover negative unit
+    #    goes to the lexicographically first branch, response sorted by branch.
+    tied_branch_payload = {
+        "detail_level": "branch",
+        "meter": {"start": "1.000", "end": "1.997"},
+        "readings": [
+            {"branch": "B2", "interval": "I1", "energy": "0.500"},
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+        ],
+    }
+    response = post(tied_branch_payload)
+    check(
+        "negative branch detail returns 200",
+        response.status_code == 200,
+        response.text,
+    )
+    if response.status_code == 200:
+        body = response.json()
+        check(
+            "tied branches split -0.003 as -0.002/-0.001 in branch-id order",
+            body["difference"] == "-0.003"
+            and body["check_sum"] == "-0.003"
+            and body["allocations"]
+            == [
+                {
+                    "interval": "I1",
+                    "branch_total": "1.000",
+                    "allocated": "-0.003",
+                    "branch_allocations": [
+                        {"branch": "B1", "energy": "0.500",
+                         "adjustment": "-0.002", "adjusted_energy": "0.498"},
+                        {"branch": "B2", "energy": "0.500",
+                         "adjustment": "-0.001", "adjusted_energy": "0.499"},
+                    ],
+                }
+            ],
+            response.text,
+        )
+
+    # 8. Invalid detail_level is rejected with loc on that field and no
+    #    partial results; omitting it (or "interval") keeps the legacy shape.
+    invalid_level = post({**payload, "detail_level": "daily"})
+    check(
+        "invalid detail_level rejected with loc on detail_level",
+        invalid_level.status_code == 422
+        and set(invalid_level.json().keys()) == {"detail"}
+        and "detail_level" in invalid_level.json()["detail"][0]["loc"],
+        invalid_level.text,
+    )
+
+    legacy = post(payload)
+    explicit_interval = post({**payload, "detail_level": "interval"})
+    check(
+        "omitted detail_level keeps the exact legacy branch-free response",
+        legacy.status_code == 200
+        and explicit_interval.content == legacy.content
+        and all(
+            "branch_allocations" not in item
+            for item in legacy.json()["allocations"]
+        ),
+        legacy.text,
+    )
+
+    # 9. Rejections carry field-locatable errors and no partial results.
     backwards = post({"meter": {"start": "5.000", "end": "4.000"},
                       "readings": [{"branch": "B1", "interval": "I1", "energy": "0.000"}]})
     check(

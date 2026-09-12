@@ -4,6 +4,8 @@ Every expectation is an exact string (three-decimal fixed point); no float
 approximation, no mocked computation.
 """
 
+from decimal import Decimal
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -154,6 +156,131 @@ def test_same_request_always_yields_identical_response():
     second = client.post(URL, json=base_payload())
     assert first.status_code == second.status_code == 200
     assert first.content == second.content
+
+
+# --- detail_level -----------------------------------------------------------
+
+def test_branch_detail_adds_bookable_per_branch_breakdown():
+    payload = {**base_payload(), "detail_level": "branch"}
+    response = client.post(URL, json=payload)
+    assert response.status_code == 200
+    assert response.json() == {
+        "meter_increment": "10.000",
+        "branch_total": "8.000",
+        "difference": "2.000",
+        "check_sum": "2.000",
+        "allocations": [
+            {
+                "interval": "I1",
+                "branch_total": "4.000",
+                "allocated": "1.000",
+                "branch_allocations": [
+                    {"branch": "B1", "energy": "3.000", "adjustment": "0.750",
+                     "adjusted_energy": "3.750"},
+                    {"branch": "B2", "energy": "1.000", "adjustment": "0.250",
+                     "adjusted_energy": "1.250"},
+                ],
+            },
+            {
+                "interval": "I2",
+                "branch_total": "3.500",
+                "allocated": "0.875",
+                "branch_allocations": [
+                    {"branch": "B1", "energy": "2.000", "adjustment": "0.500",
+                     "adjusted_energy": "2.500"},
+                    {"branch": "B2", "energy": "1.500", "adjustment": "0.375",
+                     "adjusted_energy": "1.875"},
+                ],
+            },
+            {
+                "interval": "I3",
+                "branch_total": "0.500",
+                "allocated": "0.125",
+                "branch_allocations": [
+                    {"branch": "B1", "energy": "0.500", "adjustment": "0.125",
+                     "adjusted_energy": "0.625"},
+                    {"branch": "B2", "energy": "0.000", "adjustment": "0.000",
+                     "adjusted_energy": "0.000"},
+                ],
+            },
+        ],
+    }
+
+
+def test_branch_detail_two_level_conservation_holds_per_interval():
+    payload = {**base_payload(), "detail_level": "branch"}
+    body = client.post(URL, json=payload).json()
+    for item in body["allocations"]:
+        adjustments = sum(
+            Decimal(b["adjustment"]) for b in item["branch_allocations"]
+        )
+        assert adjustments == Decimal(item["allocated"])
+        for branch in item["branch_allocations"]:
+            assert (
+                Decimal(branch["energy"]) + Decimal(branch["adjustment"])
+                == Decimal(branch["adjusted_energy"])
+            )
+
+
+def test_branch_detail_negative_difference_and_tied_branch_order():
+    payload = {
+        "detail_level": "branch",
+        "meter": {"start": "1.000", "end": "1.997"},
+        "readings": [
+            # B2 submitted first; ties must still resolve by branch id.
+            {"branch": "B2", "interval": "I1", "energy": "0.500"},
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+        ],
+    }
+    response = client.post(URL, json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["difference"] == "-0.003"
+    assert body["check_sum"] == "-0.003"
+    # -3 milliunits over equal weights: -1 each after truncation, the last
+    # negative unit goes to the lexicographically first branch (B1).
+    assert body["allocations"] == [
+        {
+            "interval": "I1",
+            "branch_total": "1.000",
+            "allocated": "-0.003",
+            "branch_allocations": [
+                {"branch": "B1", "energy": "0.500", "adjustment": "-0.002",
+                 "adjusted_energy": "0.498"},
+                {"branch": "B2", "energy": "0.500", "adjustment": "-0.001",
+                 "adjusted_energy": "0.499"},
+            ],
+        }
+    ]
+
+
+def test_invalid_detail_level_is_rejected_with_field_location():
+    payload = {**base_payload(), "detail_level": "daily"}
+    response = client.post(URL, json=payload)
+    error = assert_error(response, 422, "literal_error", ["detail_level"])
+    assert "interval" in error["msg"] and "branch" in error["msg"]
+
+
+def test_omitted_detail_level_keeps_exact_legacy_response():
+    legacy = client.post(URL, json=base_payload())
+    explicit_interval = client.post(
+        URL, json={**base_payload(), "detail_level": "interval"}
+    )
+    assert legacy.status_code == explicit_interval.status_code == 200
+    assert explicit_interval.content == legacy.content
+    body = legacy.json()
+    assert body == {
+        "meter_increment": "10.000",
+        "branch_total": "8.000",
+        "difference": "2.000",
+        "check_sum": "2.000",
+        "allocations": [
+            {"interval": "I1", "branch_total": "4.000", "allocated": "1.000"},
+            {"interval": "I2", "branch_total": "3.500", "allocated": "0.875"},
+            {"interval": "I3", "branch_total": "0.500", "allocated": "0.125"},
+        ],
+    }
+    assert all("branch_allocations" not in item for item in body["allocations"])
 
 
 # --- rejections: field-locatable errors, no partial results ------------------

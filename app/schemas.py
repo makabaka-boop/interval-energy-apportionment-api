@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, BeforeValidator, Field, model_validator
 
@@ -65,12 +65,28 @@ class BranchReading(BaseModel):
 class SettlementRequest(BaseModel):
     meter: MeterReadings
     readings: list[BranchReading] = Field(min_length=1)
+    # "interval" (default) keeps the legacy response shape; "branch" adds a
+    # per-branch breakdown to every interval. Anything else is a 422 whose
+    # loc points at this field.
+    detail_level: Literal["interval", "branch"] = "interval"
+
+
+class BranchAllocation(BaseModel):
+    """One branch's bookable adjustment inside an interval, in kWh."""
+
+    branch: str
+    energy: str
+    adjustment: str
+    adjusted_energy: str
 
 
 class IntervalAllocation(BaseModel):
     interval: str
     branch_total: str
     allocated: str
+    # Only populated for detail_level="branch"; excluded from the response
+    # when None so legacy callers see the exact original fields.
+    branch_allocations: list[BranchAllocation] | None = None
 
 
 class SettlementResponse(BaseModel):

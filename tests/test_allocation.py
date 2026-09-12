@@ -9,6 +9,7 @@ import pytest
 from app.allocation import (
     ZeroTotalWeightError,
     allocate_difference,
+    allocate_to_branches,
     format_milliunits,
     summarize_intervals,
     to_milliunits,
@@ -125,6 +126,42 @@ def test_zero_total_weight_with_nonzero_difference_is_rejected():
 
 def test_zero_total_weight_with_zero_difference_is_allowed():
     assert allocate_difference(0, {"I1": 0, "I2": 0}) == {"I1": 0, "I2": 0}
+
+
+# --- second-level branch allocation -------------------------------------------
+
+def test_branch_allocation_sums_to_interval_allocated():
+    result = allocate_to_branches(875, {"B1": 2000, "B2": 1500})
+    assert result == {"B1": 500, "B2": 375}
+    assert sum(result.values()) == 875
+
+
+def test_branch_allocation_uses_absolute_energy_as_weight():
+    # A negative branch still weighs in by magnitude and can be adjusted up.
+    result = allocate_to_branches(2, {"B1": -1000, "B2": 1000})
+    assert result == {"B1": 1, "B2": 1}
+    assert sum(result.values()) == 2
+
+
+def test_branch_allocation_tie_breaks_by_branch_id_not_insertion_order():
+    result = allocate_to_branches(1, {"B3": 10, "B1": 10, "B2": 10})
+    assert result == {"B1": 1, "B2": 0, "B3": 0}
+
+
+def test_branch_allocation_negative_hands_out_negative_units_in_same_order():
+    result = allocate_to_branches(-3, {"B2": 500, "B1": 500})
+    assert result == {"B1": -2, "B2": -1}
+    assert sum(result.values()) == -3
+
+
+@pytest.mark.parametrize("allocated", [1, 7, 999, -1, -7, -999])
+def test_branch_allocation_sum_invariant_holds(allocated):
+    result = allocate_to_branches(allocated, {"a": 7, "b": 13, "c": 0, "d": 29})
+    assert sum(result.values()) == allocated
+
+
+def test_branch_allocation_zero_allocated_gives_zeros():
+    assert allocate_to_branches(0, {"B1": 100, "B2": 0}) == {"B1": 0, "B2": 0}
 
 
 # --- fixed-point helpers ----------------------------------------------------

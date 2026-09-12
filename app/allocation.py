@@ -88,3 +88,18 @@ def allocate_difference(difference: int, weights: dict[str, int]) -> dict[str, i
     for interval in order[:leftover]:
         shares[interval] += sign
     return shares
+
+
+def allocate_to_branches(allocated: int, branch_energies: dict[str, int]) -> dict[str, int]:
+    """Second-level allocation: spread an interval's ``allocated`` milliunits
+    across its branches proportionally to each branch's *absolute* energy.
+
+    Uses the same fixed-point largest-remainder rules as
+    :func:`allocate_difference`, with remainder ties resolved by ascending
+    branch id (lexicographic). The result always sums exactly to
+    ``allocated``. A non-zero ``allocated`` implies the interval had non-zero
+    weight, so at least one branch weight is positive and
+    :class:`ZeroTotalWeightError` cannot occur here.
+    """
+    weights = {branch: abs(energy) for branch, energy in branch_energies.items()}
+    return allocate_difference(allocated, weights)

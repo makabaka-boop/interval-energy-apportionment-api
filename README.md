@@ -61,6 +61,26 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
   （同一区间正负支路互相抵消时，净额为零但权重仍按绝对电量累计）。
 - `check_sum`：分摊后校核和，恒等于 `difference`。
 
+### 可选的支路级明细（detail_level）
+
+请求体可附加 `"detail_level": "branch"`（只接受 `interval` 或 `branch`，
+缺省等同 `interval`，非法值返回定位到 `detail_level` 的 422）。此时每个
+区间附加按支路编号排序的 `branch_allocations`：服务先把区间分摊值按
+**支路电量绝对值**做第二级定点最大余数分配（余数并列按支路编号字典序），
+保证各支路 `adjustment` 之和恒等于该区间的 `allocated`：
+
+```json
+{"interval": "I1", "branch_total": "4.000", "allocated": "1.000",
+ "branch_allocations": [
+   {"branch": "B1", "energy": "3.000", "adjustment": "0.750", "adjusted_energy": "3.750"},
+   {"branch": "B2", "energy": "1.000", "adjustment": "0.250", "adjusted_energy": "1.250"}
+ ]}
+```
+
+`energy` 为支路原电量，`adjustment` 为分摊调整量，`adjusted_energy` 为
+调整后可入账电量。未传 `detail_level` 时响应字段与上述基础版本完全一致，
+不含 `branch_allocations` 键。
+
 ## 分摊规则（定点最大余数法）
 
 1. 表差、电量全部换算为 0.001 kWh 的整数倍（milliunit）计算。
@@ -81,6 +101,7 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 | --- | --- |
 | 精度越界（超过 3 位小数） | `value_error`（422，loc 定位到具体字段） |
 | 读数倒退（end < start） | `value_error`（422，loc 定位到 `meter`） |
+| `detail_level` 非法取值 | `literal_error`（422，loc 定位到 `detail_level`） |
 | 区间集合不一致 | `interval_set_mismatch`（422） |
 | 同一支路同一区间重复上报 | `duplicate_reading`（422，loc 含下标） |
 | 权重总和为零且表差非零 | `zero_total_weight`（422） |

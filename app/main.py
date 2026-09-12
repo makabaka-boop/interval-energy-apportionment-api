@@ -9,11 +9,13 @@ from fastapi.responses import JSONResponse
 from .allocation import (
     ZeroTotalWeightError,
     allocate_difference,
+    allocate_to_branches,
     format_milliunits,
     summarize_intervals,
     to_milliunits,
 )
 from .schemas import (
+    BranchAllocation,
     IntervalAllocation,
     SettlementRequest,
     SettlementResponse,
@@ -67,7 +69,14 @@ def healthz() -> dict:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/settlements/allocate", response_model=SettlementResponse)
+@app.post(
+    "/api/v1/settlements/allocate",
+    response_model=SettlementResponse,
+    # Requests without detail_level="branch" must keep the exact legacy
+    # response shape, so the optional branch_allocations field is omitted
+    # entirely when unset.
+    response_model_exclude_none=True,
+)
 def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
     # Reject duplicate (branch, interval) readings, pointing at the offending item.
     seen: dict[tuple[str, str], int] = {}
@@ -123,14 +132,41 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
     if check_sum != difference:  # internal invariant, can never trigger
         raise AssertionError("allocation does not sum to the difference")
 
-    allocations = [
-        IntervalAllocation(
-            interval=interval,
-            branch_total=format_milliunits(interval_totals[interval]),
-            allocated=format_milliunits(allocation[interval]),
+    # Second level only when requested: per interval, spread its allocated
+    # share across branches proportionally to absolute branch energy.
+    energies_by_interval: dict[str, dict[str, int]] | None = None
+    if payload.detail_level == "branch":
+        energies_by_interval = {}
+        for reading in payload.readings:
+            energies_by_interval.setdefault(reading.interval, {})[reading.branch] = (
+                to_milliunits(reading.energy)
+            )
+
+    allocations = []
+    for interval in sorted(interval_totals):
+        branch_allocations = None
+        if energies_by_interval is not None:
+            energies = energies_by_interval[interval]
+            adjustments = allocate_to_branches(allocation[interval], energies)
+            branch_allocations = [
+                BranchAllocation(
+                    branch=branch,
+                    energy=format_milliunits(energies[branch]),
+                    adjustment=format_milliunits(adjustments[branch]),
+                    adjusted_energy=format_milliunits(
+                        energies[branch] + adjustments[branch]
+                    ),
+                )
+                for branch in sorted(energies)
+            ]
+        allocations.append(
+            IntervalAllocation(
+                interval=interval,
+                branch_total=format_milliunits(interval_totals[interval]),
+                allocated=format_milliunits(allocation[interval]),
+                branch_allocations=branch_allocations,
+            )
         )
-        for interval in sorted(interval_totals)
-    ]
     return SettlementResponse(
         meter_increment=format_milliunits(meter_increment),
         branch_total=format_milliunits(branch_total),
