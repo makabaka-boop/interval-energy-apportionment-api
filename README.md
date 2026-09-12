@@ -101,6 +101,8 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 | --- | --- |
 | 精度越界（超过 3 位小数） | `value_error`（422，loc 定位到具体字段） |
 | 读数倒退（end < start） | `value_error`（422，loc 定位到 `meter`） |
+| 支路/区间编号为空或全空白 | `value_error`（422，loc 定位到 `readings.<i>.branch` / `readings.<i>.interval`） |
+| 请求体出现未知字段（如误拼 `detail_level` 或读数内误拼字段） | `extra_forbidden`（422，loc 定位到该未知字段） |
 | `detail_level` 非法取值 | `literal_error`（422，loc 定位到 `detail_level`） |
 | 区间集合不一致 | `interval_set_mismatch`（422） |
 | 同一支路同一区间重复上报 | `duplicate_reading`（422，loc 含下标） |

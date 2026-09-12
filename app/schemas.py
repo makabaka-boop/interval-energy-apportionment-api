@@ -5,7 +5,14 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 MAX_DECIMAL_PLACES = 3
 
@@ -39,8 +46,25 @@ MilliDecimal = Annotated[
 ]
 
 
+def _require_non_blank(value: str) -> str:
+    """Reject identifiers that consist only of whitespace.
+
+    ``min_length=1`` already rejects the empty string, but ``"   "`` would
+    otherwise flow into the allocation and produce unidentifiable bookable
+    rows.
+    """
+    if not value.strip():
+        raise ValueError("identifier must not be blank or all whitespace")
+    return value
+
+
+NonBlankStr = Annotated[str, AfterValidator(_require_non_blank)]
+
+
 class MeterReadings(BaseModel):
     """Total-meter start/end readings in kWh."""
+
+    model_config = ConfigDict(extra="forbid")
 
     start: MilliDecimal
     end: MilliDecimal
@@ -57,12 +81,19 @@ class MeterReadings(BaseModel):
 class BranchReading(BaseModel):
     """One branch's aggregated energy for one interval, in kWh."""
 
-    branch: str = Field(min_length=1)
-    interval: str = Field(min_length=1)
+    # A misspelled key (e.g. "enery") must be rejected, not silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
+    branch: NonBlankStr = Field(min_length=1)
+    interval: NonBlankStr = Field(min_length=1)
     energy: MilliDecimal
 
 
 class SettlementRequest(BaseModel):
+    # Unknown top-level fields (e.g. a misspelled "detail_level") must be
+    # rejected instead of silently falling back to interval-level results.
+    model_config = ConfigDict(extra="forbid")
+
     meter: MeterReadings
     readings: list[BranchReading] = Field(min_length=1)
     # "interval" (default) keeps the legacy response shape; "branch" adds a

@@ -380,6 +380,38 @@ def test_empty_readings_list_is_rejected():
     assert_error(response, 422, "too_short", ["readings"])
 
 
+def test_all_whitespace_branch_id_is_rejected_before_allocation():
+    payload = base_payload()
+    payload["readings"][0]["branch"] = "   "
+    response = client.post(URL, json=payload)
+    error = assert_error(response, 422, "value_error", ["readings", 0, "branch"])
+    assert "whitespace" in error["msg"]
+
+
+def test_all_whitespace_interval_id_is_rejected_before_allocation():
+    payload = base_payload()
+    payload["readings"][1]["interval"] = " \t "
+    response = client.post(URL, json=payload)
+    error = assert_error(response, 422, "value_error", ["readings", 1, "interval"])
+    assert "whitespace" in error["msg"]
+
+
+def test_misspelled_detail_level_field_is_rejected():
+    # "detail_leve" must not silently fall back to interval-level results.
+    payload = {**base_payload(), "detail_leve": "branch"}
+    response = client.post(URL, json=payload)
+    assert_error(response, 422, "extra_forbidden", ["detail_leve"])
+
+
+def test_misspelled_extra_reading_field_is_rejected():
+    # The misspelled "enery" rides alongside a valid "energy"; it must be
+    # rejected and located, not silently ignored.
+    payload = base_payload()
+    payload["readings"][0]["enery"] = "9.999"
+    response = client.post(URL, json=payload)
+    assert_error(response, 422, "extra_forbidden", ["readings", 0, "enery"])
+
+
 def test_healthz():
     response = client.get("/healthz")
     assert response.status_code == 200
