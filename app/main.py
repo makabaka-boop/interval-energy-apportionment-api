@@ -10,6 +10,7 @@ from .allocation import (
     ZeroTotalWeightError,
     allocate_difference,
     format_milliunits,
+    summarize_intervals,
     to_milliunits,
 )
 from .schemas import (
@@ -102,18 +103,16 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                 "interval_set_mismatch",
             )
 
-    # Aggregate branch energies per interval in fixed point.
-    interval_totals: dict[str, int] = {}
-    for reading in payload.readings:
-        interval_totals[reading.interval] = (
-            interval_totals.get(reading.interval, 0)
-            + to_milliunits(reading.energy)
-        )
+    # Aggregate per interval: signed branch total, and weight = sum of the
+    # absolute branch energies (cancelling +/- branches still weigh in).
+    interval_totals, weights = summarize_intervals(
+        (reading.interval, to_milliunits(reading.energy))
+        for reading in payload.readings
+    )
 
     meter_increment = to_milliunits(payload.meter.end) - to_milliunits(payload.meter.start)
     branch_total = sum(interval_totals.values())
     difference = meter_increment - branch_total
-    weights = {interval: abs(total) for interval, total in interval_totals.items()}
 
     try:
         allocation = allocate_difference(difference, weights)

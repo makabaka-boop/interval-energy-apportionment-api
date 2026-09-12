@@ -8,12 +8,30 @@ so the smallest unit can never be lost to rounding.
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Iterable
 
 MILLIUNITS_PER_KWH = 1000
 
 
 class ZeroTotalWeightError(Exception):
     """Raised when the difference is non-zero but every interval weight is zero."""
+
+
+def summarize_intervals(
+    energies: Iterable[tuple[str, int]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Aggregate ``(interval, milliunits)`` pairs into signed totals and weights.
+
+    An interval's weight is the sum of the *absolute* energy of every branch
+    in that interval, so positive and negative branch readings that cancel
+    each other still contribute their magnitude to the weight.
+    """
+    totals: dict[str, int] = {}
+    weights: dict[str, int] = {}
+    for interval, energy in energies:
+        totals[interval] = totals.get(interval, 0) + energy
+        weights[interval] = weights.get(interval, 0) + abs(energy)
+    return totals, weights
 
 
 def to_milliunits(value: Decimal) -> int:

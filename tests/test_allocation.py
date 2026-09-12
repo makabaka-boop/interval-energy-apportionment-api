@@ -10,9 +10,29 @@ from app.allocation import (
     ZeroTotalWeightError,
     allocate_difference,
     format_milliunits,
+    summarize_intervals,
     to_milliunits,
 )
 from decimal import Decimal
+
+
+# --- interval weights ---------------------------------------------------------
+
+def test_interval_weight_is_sum_of_absolute_branch_energies():
+    totals, weights = summarize_intervals(
+        [("I1", 4000), ("I1", -4000), ("I2", 2000), ("I2", -500)]
+    )
+    assert totals == {"I1": 0, "I2": 1500}
+    # +/- branches cancel in the total but still contribute their magnitude
+    assert weights == {"I1": 8000, "I2": 2500}
+
+
+def test_cancelled_interval_still_receives_its_share():
+    # I1 nets to zero yet holds 80% of the absolute branch energy.
+    _, weights = summarize_intervals([("I1", 4000), ("I1", -4000), ("I2", 2000)])
+    result = allocate_difference(1000, weights)
+    assert result == {"I1": 800, "I2": 200}
+    assert sum(result.values()) == 1000
 
 
 # --- allocation sum -------------------------------------------------------

@@ -44,6 +44,29 @@ def test_full_response_is_exact_and_sorted_by_interval():
     }
 
 
+def test_cancelling_branches_keep_interval_weight():
+    payload = {
+        "meter": {"start": "0.000", "end": "3.000"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "4.000"},
+            {"branch": "B2", "interval": "I1", "energy": "-4.000"},
+            {"branch": "B1", "interval": "I2", "energy": "2.000"},
+            {"branch": "B2", "interval": "I2", "energy": "0.000"},
+        ],
+    }
+    # branch total 2.000 -> difference 1.000; I1 nets to 0 but its weight is
+    # |4.000| + |-4.000| = 8.000 vs I2's 2.000, so the split is 0.800 / 0.200.
+    response = client.post(URL, json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["difference"] == "1.000"
+    assert body["check_sum"] == "1.000"
+    assert body["allocations"] == [
+        {"interval": "I1", "branch_total": "0.000", "allocated": "0.800"},
+        {"interval": "I2", "branch_total": "2.000", "allocated": "0.200"},
+    ]
+
+
 def test_negative_interval_total_uses_absolute_weight():
     payload = {
         "meter": {"start": "0.000", "end": "2.000"},

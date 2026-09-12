@@ -137,14 +137,41 @@ def main() -> int:
             response.text,
         )
 
-    # 4. Determinism: identical requests produce byte-identical responses.
+    # 4. Cancelling +/- branches: weight is the sum of absolute branch
+    #    energies, so the cancelled interval still receives its share.
+    cancel_payload = {
+        "meter": {"start": "0.000", "end": "3.000"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "4.000"},
+            {"branch": "B2", "interval": "I1", "energy": "-4.000"},
+            {"branch": "B1", "interval": "I2", "energy": "2.000"},
+            {"branch": "B2", "interval": "I2", "energy": "0.000"},
+        ],
+    }
+    response = post(cancel_payload)
+    check("cancelling branches return 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        body = response.json()
+        check(
+            "cancelled interval keeps weight from absolute branch energies",
+            body["difference"] == "1.000"
+            and body["check_sum"] == "1.000"
+            and body["allocations"]
+            == [
+                {"interval": "I1", "branch_total": "0.000", "allocated": "0.800"},
+                {"interval": "I2", "branch_total": "2.000", "allocated": "0.200"},
+            ],
+            response.text,
+        )
+
+    # 5. Determinism: identical requests produce byte-identical responses.
     first, second = post(payload), post(payload)
     check(
         "identical requests are byte-identical",
         first.status_code == 200 and first.content == second.content,
     )
 
-    # 5. Rejections carry field-locatable errors and no partial results.
+    # 6. Rejections carry field-locatable errors and no partial results.
     backwards = post({"meter": {"start": "5.000", "end": "4.000"},
                       "readings": [{"branch": "B1", "interval": "I1", "energy": "0.000"}]})
     check(
