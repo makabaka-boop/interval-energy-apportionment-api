@@ -11,6 +11,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    StrictBool,
     model_validator,
 )
 
@@ -58,7 +59,27 @@ def _require_non_blank(value: str) -> str:
     return value
 
 
-NonBlankStr = Annotated[str, AfterValidator(_require_non_blank)]
+def _require_no_surrounding_whitespace(value: str) -> str:
+    """Reject identifiers carrying leading or trailing whitespace.
+
+    ``" B1"`` and ``"B1"`` look identical to a settlement clerk but would be
+    booked as two distinct branches (or intervals): detail rows split, the
+    leftover 0.001 kWh units land on the wrong id, and a padded
+    fixed-adjustment id is misreported as an unknown reading. The format
+    anomaly must be rejected up front, never silently normalized.
+    """
+    if value != value.strip():
+        raise ValueError(
+            "identifier must not have leading or trailing whitespace"
+        )
+    return value
+
+
+IdentifierStr = Annotated[
+    str,
+    AfterValidator(_require_non_blank),
+    AfterValidator(_require_no_surrounding_whitespace),
+]
 
 
 class MeterReadings(BaseModel):
@@ -84,8 +105,8 @@ class BranchReading(BaseModel):
     # A misspelled key (e.g. "enery") must be rejected, not silently dropped.
     model_config = ConfigDict(extra="forbid")
 
-    branch: NonBlankStr = Field(min_length=1)
-    interval: NonBlankStr = Field(min_length=1)
+    branch: IdentifierStr = Field(min_length=1)
+    interval: IdentifierStr = Field(min_length=1)
     energy: MilliDecimal
 
 
@@ -94,8 +115,8 @@ class FixedAdjustment(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    branch: NonBlankStr = Field(min_length=1)
-    interval: NonBlankStr = Field(min_length=1)
+    branch: IdentifierStr = Field(min_length=1)
+    interval: IdentifierStr = Field(min_length=1)
     adjustment: MilliDecimal
 
 
@@ -116,8 +137,10 @@ class SettlementRequest(BaseModel):
     fixed_adjustments: list[FixedAdjustment] = Field(default_factory=list)
     # Opt-in audit trail: requires detail_level="branch" and appends
     # calculation_trace to the response. Omitted/false keeps the response
-    # field-for-field identical to the untraced shape.
-    include_trace: bool = False
+    # field-for-field identical to the untraced shape. Strictly boolean: a
+    # numeric switch (e.g. 1/0) must not silently change the response
+    # structure, so it is rejected with a 422 located at this field.
+    include_trace: StrictBool = False
 
 
 class BranchAllocation(BaseModel):

@@ -610,6 +610,70 @@ def main() -> int:
         untraced_branch.text,
     )
 
+    # 15. Identifier format and switch-type guards: visually identical ids
+    #     padded with whitespace are rejected before allocation (never split
+    #     into two bookable rows or two interval results), a padded
+    #     fixed-adjustment id points at the identifier field instead of an
+    #     unknown reading, and a non-boolean include_trace is rejected.
+    padded_branch = post({
+        "detail_level": "branch",
+        "meter": {"start": "0.000", "end": "1.001"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+            {"branch": " B1", "interval": "I1", "energy": "0.500"},
+        ],
+    })
+    check(
+        "whitespace-padded branch id rejected with loc on that branch field",
+        padded_branch.status_code == 422
+        and set(padded_branch.json().keys()) == {"detail"}
+        and padded_branch.json()["detail"][0]["loc"]
+        == ["body", "readings", 1, "branch"],
+        padded_branch.text,
+    )
+
+    padded_interval = post({
+        "meter": {"start": "0.000", "end": "1.001"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+            {"branch": "B1", "interval": "I1 ", "energy": "0.500"},
+        ],
+    })
+    check(
+        "whitespace-padded interval id rejected with loc on that interval field",
+        padded_interval.status_code == 422
+        and set(padded_interval.json().keys()) == {"detail"}
+        and padded_interval.json()["detail"][0]["loc"]
+        == ["body", "readings", 1, "interval"],
+        padded_interval.text,
+    )
+
+    padded_fixed = post({
+        "detail_level": "branch",
+        "meter": {"start": "0.000", "end": "1.001"},
+        "readings": [{"branch": "B1", "interval": "I1", "energy": "1.000"}],
+        "fixed_adjustments": [
+            {"branch": " B1", "interval": "I1", "adjustment": "0.001"}
+        ],
+    })
+    check(
+        "whitespace-padded fixed adjustment id rejected at the identifier field",
+        padded_fixed.status_code == 422
+        and padded_fixed.json()["detail"][0]["loc"]
+        == ["body", "fixed_adjustments", 0, "branch"]
+        and padded_fixed.json()["detail"][0]["type"] == "value_error",
+        padded_fixed.text,
+    )
+
+    numeric_trace = post({**payload, "detail_level": "branch", "include_trace": 1})
+    check(
+        "numeric include_trace rejected with loc on include_trace",
+        numeric_trace.status_code == 422
+        and set(numeric_trace.json().keys()) == {"detail"}
+        and numeric_trace.json()["detail"][0]["loc"] == ["body", "include_trace"],
+        numeric_trace.text,
+    )
+
     if FAILURES:
         print(f"\n{len(FAILURES)} acceptance check(s) failed: {FAILURES}")
         return 1

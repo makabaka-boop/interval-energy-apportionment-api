@@ -186,7 +186,7 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 | --- | --- |
 | 精度越界（超过 3 位小数） | `value_error`（422，loc 定位到具体字段） |
 | 读数倒退（end < start） | `value_error`（422，loc 定位到 `meter`） |
-| 支路/区间编号为空或全空白 | `value_error`（422，loc 定位到 `readings.<i>.branch` / `readings.<i>.interval`） |
+| 支路/区间编号为空、全空白或带前后空格 | `value_error`（422，loc 定位到 `readings.<i>.branch` / `readings.<i>.interval` / `fixed_adjustments.<i>.branch` / `fixed_adjustments.<i>.interval`） |
 | 请求体出现未知字段（如误拼 `detail_level` 或读数内误拼字段） | `extra_forbidden`（422，loc 定位到该未知字段） |
 | `detail_level` 非法取值 | `literal_error`（422，loc 定位到 `detail_level`） |
 | 区间集合不一致 | `interval_set_mismatch`（422） |
@@ -197,3 +197,4 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 | 锁定调整与表差方向不一致，或绝对值合计超过表差 | `fixed_adjustment_sign_mismatch` / `fixed_adjustment_total_exceeds_difference`（422，loc 定位到具体 `adjustment`） |
 | 扣除锁定项后余量非零，但未锁定读数绝对电量合计为零 | `zero_unlocked_weight`（422，loc 定位到具体锁定项或读数） |
 | 传入 `include_trace: true` 但未使用 `detail_level: "branch"` | `include_trace_requires_branch_detail`（422，loc 定位到 `include_trace`） |
+| `include_trace` 非布尔取值（如数字 `1`/`0`） | `bool_type`（422，loc 定位到 `include_trace`） |

@@ -1073,6 +1073,80 @@ def test_all_whitespace_interval_id_is_rejected_before_allocation():
     assert "whitespace" in error["msg"]
 
 
+def test_padded_branch_id_is_rejected_instead_of_splitting_detail_rows():
+    # " B1" and "B1" are visually identical; booking them as two branches
+    # would split the detail rows and misplace the leftover 0.001 kWh unit.
+    payload = {
+        "detail_level": "branch",
+        "meter": {"start": "0.000", "end": "1.001"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+            {"branch": " B1", "interval": "I1", "energy": "0.500"},
+        ],
+    }
+    response = client.post(URL, json=payload)
+    error = assert_error(response, 422, "value_error", ["readings", 1, "branch"])
+    assert "whitespace" in error["msg"]
+
+
+def test_padded_interval_id_is_rejected_instead_of_duplicating_intervals():
+    # "I1" and "I1 " must not produce two interval results with the leftover
+    # milliunit placed on the wrong one.
+    payload = {
+        "meter": {"start": "0.000", "end": "1.001"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "0.500"},
+            {"branch": "B1", "interval": "I1 ", "energy": "0.500"},
+        ],
+    }
+    response = client.post(URL, json=payload)
+    error = assert_error(response, 422, "value_error", ["readings", 1, "interval"])
+    assert "whitespace" in error["msg"]
+
+
+def test_padded_fixed_adjustment_id_points_at_identifier_format():
+    # The locked reading exists; the anomaly is the padded identifier, so the
+    # error must locate the identifier field, not claim an unknown reading.
+    payload = {
+        **base_payload(),
+        "detail_level": "branch",
+        "fixed_adjustments": [
+            {"branch": " B1", "interval": "I1", "adjustment": "0.001"}
+        ],
+    }
+    response = client.post(URL, json=payload)
+    error = assert_error(
+        response, 422, "value_error", ["fixed_adjustments", 0, "branch"]
+    )
+    assert "whitespace" in error["msg"]
+
+
+def test_padded_fixed_adjustment_interval_points_at_identifier_format():
+    payload = {
+        **base_payload(),
+        "detail_level": "branch",
+        "fixed_adjustments": [
+            {"branch": "B1", "interval": "I1 ", "adjustment": "0.001"}
+        ],
+    }
+    response = client.post(URL, json=payload)
+    error = assert_error(
+        response, 422, "value_error", ["fixed_adjustments", 0, "interval"]
+    )
+    assert "whitespace" in error["msg"]
+
+
+def test_non_boolean_include_trace_is_rejected_with_field_location():
+    for bad_value in (1, 0, "true"):
+        payload = {
+            **base_payload(),
+            "detail_level": "branch",
+            "include_trace": bad_value,
+        }
+        response = client.post(URL, json=payload)
+        assert_error(response, 422, "bool_type", ["include_trace"])
+
+
 def test_misspelled_detail_level_field_is_rejected():
     # "detail_leve" must not silently fall back to interval-level results.
     payload = {**base_payload(), "detail_leve": "branch"}
