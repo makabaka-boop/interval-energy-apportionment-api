@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -226,3 +227,70 @@ class SettlementResponse(BaseModel):
     # Present only when the request asked for include_trace=true; omitted
     # otherwise so untraced responses keep their exact original fields.
     calculation_trace: CalculationTrace | None = None
+
+
+# --- meter reading sequence derivation --------------------------------------
+
+
+def _require_positive_range(value: Decimal) -> Decimal:
+    """The full-scale upper bound must be a positive three-decimal value.
+
+    A zero or negative range makes the rollover formula
+    (``range_max - start + end``) meaningless, so it must be rejected up
+    front with the error located at the ``range_max`` field.
+    """
+    if value <= 0:
+        raise ValueError(
+            "range_max must be greater than zero (smallest positive range "
+            "is 0.001 kWh)"
+        )
+    return value
+
+
+RangeMaxDecimal = Annotated[
+    MilliDecimal,
+    AfterValidator(_require_positive_range),
+]
+
+
+class MeterSample(BaseModel):
+    """One time-stamped cumulative meter indication, in kWh."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: datetime
+    value: MilliDecimal
+
+
+class MeterSequenceRequest(BaseModel):
+    """A meter id, its three-decimal full-scale range and the time-ordered
+    cumulative samples, with one segment declaration per adjacent pair."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meter_id: IdentifierStr = Field(min_length=1)
+    range_max: RangeMaxDecimal
+    # At least two samples are needed to form one interval; the
+    # len(segments) == len(samples) - 1 relationship is checked in the
+    # service so the error can point precisely at "segments".
+    samples: list[MeterSample] = Field(min_length=2)
+    segments: list[Literal["normal", "rollover"]] = Field(min_length=1)
+
+
+class MeterInterval(BaseModel):
+    """One derived interval energy in kWh, sorted by start time."""
+
+    index: int
+    start_time: datetime
+    end_time: datetime
+    start_value: str
+    end_value: str
+    segment_type: Literal["normal", "rollover"]
+    energy: str
+
+
+class MeterSequenceResponse(BaseModel):
+    meter_id: str
+    range_max: str
+    intervals: list[MeterInterval]
+    total_energy: str

@@ -14,12 +14,16 @@ from .allocation import (
     summarize_intervals,
     to_milliunits,
 )
+from .meter_sequence import SequenceError, derive_sequence
 from .schemas import (
     BranchAllocation,
     BranchCalculationTrace,
     CalculationTrace,
     IntervalAllocation,
     IntervalCalculationTrace,
+    MeterInterval,
+    MeterSequenceRequest,
+    MeterSequenceResponse,
     SettlementRequest,
     SettlementResponse,
 )
@@ -379,4 +383,44 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
         check_sum=format_milliunits(check_sum),
         allocations=allocations,
         calculation_trace=calculation_trace,
+    )
+
+
+@app.post(
+    "/api/v1/meter-sequences/derive",
+    response_model=MeterSequenceResponse,
+)
+def derive_meter_sequence(payload: MeterSequenceRequest) -> MeterSequenceResponse:
+    # Independently of the allocation endpoint: convert once to milliunit
+    # integers, derive each declared interval, and let the service reject
+    # the whole request (never a partial interval) on ordering, range or
+    # direction contradictions.
+    range_max = to_milliunits(payload.range_max)
+    values = [to_milliunits(sample.value) for sample in payload.samples]
+    timestamps = [sample.timestamp for sample in payload.samples]
+    try:
+        derivation = derive_sequence(
+            range_max, values, timestamps, payload.segments
+        )
+    except SequenceError as exc:
+        # Service locs are body-relative; the wire loc starts with "body".
+        raise ApiError(422, ["body", *exc.loc], exc.msg, exc.err_type) from exc
+
+    intervals = [
+        MeterInterval(
+            index=segment.index,
+            start_time=segment.start_time,
+            end_time=segment.end_time,
+            start_value=format_milliunits(segment.start_value),
+            end_value=format_milliunits(segment.end_value),
+            segment_type=segment.segment_type,
+            energy=format_milliunits(segment.energy),
+        )
+        for segment in derivation.segments
+    ]
+    return MeterSequenceResponse(
+        meter_id=payload.meter_id,
+        range_max=format_milliunits(derivation.range_max),
+        intervals=intervals,
+        total_energy=format_milliunits(derivation.total_energy),
     )

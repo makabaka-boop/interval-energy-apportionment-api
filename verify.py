@@ -17,6 +17,7 @@ import httpx
 
 BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
 ALLOCATE_URL = f"{BASE_URL}/api/v1/settlements/allocate"
+SEQUENCE_URL = f"{BASE_URL}/api/v1/meter-sequences/derive"
 HEALTH_URL = f"{BASE_URL}/healthz"
 
 FAILURES: list[str] = []
@@ -672,6 +673,211 @@ def main() -> int:
         and set(numeric_trace.json().keys()) == {"detail"}
         and numeric_trace.json()["detail"][0]["loc"] == ["body", "include_trace"],
         numeric_trace.text,
+    )
+
+    # --- meter reading sequence derivation -------------------------------
+    # A sample crossing the full scale more than once: the total is
+    # recomputed independently here from the declared segment types with
+    # Decimal arithmetic (no reliance on the service's own total field).
+    from decimal import Decimal
+
+    def post_sequence(seq_payload):
+        return httpx.post(SEQUENCE_URL, json=seq_payload, timeout=10.0)
+
+    def expected_segment_energy(seq_payload, index):
+        rng = Decimal(seq_payload["range_max"])
+        start = Decimal(seq_payload["samples"][index]["value"])
+        end = Decimal(seq_payload["samples"][index + 1]["value"])
+        if seq_payload["segments"][index] == "rollover":
+            return rng - start + end
+        return end - start
+
+    sequence_payload = {
+        "meter_id": "M-SEQ-1",
+        "range_max": "100.000",
+        "samples": [
+            {"timestamp": "2026-09-01T00:00:00", "value": "90.000"},
+            {"timestamp": "2026-09-02T00:00:00", "value": "95.000"},
+            {"timestamp": "2026-09-03T00:00:00", "value": "5.000"},
+            {"timestamp": "2026-09-04T00:00:00", "value": "8.000"},
+            {"timestamp": "2026-09-05T00:00:00", "value": "2.000"},
+            {"timestamp": "2026-09-06T00:00:00", "value": "2.000"},
+        ],
+        "segments": ["normal", "rollover", "normal", "rollover", "normal"],
+    }
+    response = post_sequence(sequence_payload)
+    check("meter sequence derivation returns 200",
+          response.status_code == 200, response.text)
+    if response.status_code == 200:
+        body = response.json()
+        # Independent per-segment recomputation from the raw submission.
+        recomputed = [
+            expected_segment_energy(sequence_payload, i)
+            for i in range(len(sequence_payload["segments"]))
+        ]
+        over_the_wire = [
+            Decimal(interval["energy"]) for interval in body["intervals"]
+        ]
+        check(
+            "each interval energy recomputes independently (normal + rollover)",
+            over_the_wire == recomputed
+            and [format(amount, ".3f") for amount in recomputed]
+            == ["5.000", "10.000", "3.000", "94.000", "0.000"],
+            response.text,
+        )
+        check(
+            "intervals are sorted by start time and carry segment types",
+            [interval["start_time"] for interval in body["intervals"]]
+            == sorted(
+                interval["start_time"] for interval in body["intervals"]
+            )
+            and [interval["segment_type"] for interval in body["intervals"]]
+            == ["normal", "rollover", "normal", "rollover", "normal"],
+            response.text,
+        )
+        # Cross-range total: independently summed, and equal to the
+        # service's total_energy (which itself equals the per-segment sum).
+        independent_total = sum(recomputed, Decimal("0"))
+        check(
+            "cross-range total independently reconciles to 112.000 kWh",
+            Decimal(body["total_energy"]) == independent_total
+            == Decimal("112.000")
+            and sum(over_the_wire) == Decimal(body["total_energy"]),
+            response.text,
+        )
+
+    # Boundary readings: exactly 0 and exactly range_max are legal.
+    boundary_payload = {
+        "meter_id": "M-SEQ-2",
+        "range_max": "10.000",
+        "samples": [
+            {"timestamp": "2026-09-01T00:00:00", "value": "0.000"},
+            {"timestamp": "2026-09-02T00:00:00", "value": "10.000"},
+            {"timestamp": "2026-09-03T00:00:00", "value": "0.000"},
+        ],
+        "segments": ["normal", "rollover"],
+    }
+    response = post_sequence(boundary_payload)
+    check("boundary readings 0 and range_max accepted",
+          response.status_code == 200
+          and [i["energy"] for i in response.json()["intervals"]]
+          == ["10.000", "0.000"]
+          and response.json()["total_energy"] == "10.000",
+          response.text)
+
+    # Out-of-range reading is located at the offending sample's value.
+    bad_range_payload = {
+        "meter_id": "M-SEQ-3",
+        "range_max": "100.000",
+        "samples": [
+            {"timestamp": "2026-09-01T00:00:00", "value": "1.000"},
+            {"timestamp": "2026-09-02T00:00:00", "value": "100.001"},
+        ],
+        "segments": ["normal"],
+    }
+    response = post_sequence(bad_range_payload)
+    check(
+        "out-of-range reading rejected at samples.1.value",
+        response.status_code == 422
+        and response.json()["detail"][0]["type"] == "reading_out_of_range"
+        and response.json()["detail"][0]["loc"]
+        == ["body", "samples", 1, "value"],
+        response.text,
+    )
+
+    # Direction contradiction: a decrease declared 'normal' is located at
+    # the specific segment; the request yields no partial intervals.
+    mismatch_payload = {
+        "meter_id": "M-SEQ-4",
+        "range_max": "100.000",
+        "samples": [
+            {"timestamp": "2026-09-01T00:00:00", "value": "90.000"},
+            {"timestamp": "2026-09-02T00:00:00", "value": "5.000"},
+        ],
+        "segments": ["normal"],
+    }
+    response = post_sequence(mismatch_payload)
+    check(
+        "normal segment over a decrease rejected at segments.0",
+        response.status_code == 422
+        and set(response.json().keys()) == {"detail"}
+        and response.json()["detail"][0]["type"]
+        == "segment_direction_mismatch"
+        and response.json()["detail"][0]["loc"]
+        == ["body", "segments", 0],
+        response.text,
+    )
+
+    # Reversed/duplicate timestamps are located at the later sample.
+    reversed_payload = {
+        "meter_id": "M-SEQ-5",
+        "range_max": "100.000",
+        "samples": [
+            {"timestamp": "2026-09-02T00:00:00", "value": "1.000"},
+            {"timestamp": "2026-09-01T00:00:00", "value": "2.000"},
+        ],
+        "segments": ["normal"],
+    }
+    response = post_sequence(reversed_payload)
+    check(
+        "reversed timestamps rejected at samples.1.timestamp",
+        response.status_code == 422
+        and response.json()["detail"][0]["type"] == "timestamp_not_ascending"
+        and response.json()["detail"][0]["loc"]
+        == ["body", "samples", 1, "timestamp"],
+        response.text,
+    )
+
+    duplicate_payload = {
+        "meter_id": "M-SEQ-6",
+        "range_max": "100.000",
+        "samples": [
+            {"timestamp": "2026-09-01T00:00:00", "value": "1.000"},
+            {"timestamp": "2026-09-01T00:00:00", "value": "2.000"},
+        ],
+        "segments": ["normal"],
+    }
+    response = post_sequence(duplicate_payload)
+    check(
+        "duplicate timestamps rejected at samples.1.timestamp",
+        response.status_code == 422
+        and response.json()["detail"][0]["type"] == "duplicate_timestamp"
+        and response.json()["detail"][0]["loc"]
+        == ["body", "samples", 1, "timestamp"],
+        response.text,
+    )
+
+    # Declaration count mismatch points at segments, with no partial data.
+    length_payload = {**sequence_payload, "segments": ["normal", "rollover"]}
+    response = post_sequence(length_payload)
+    check(
+        "segment count mismatch rejected at segments",
+        response.status_code == 422
+        and response.json()["detail"][0]["type"]
+        == "segments_length_mismatch"
+        and response.json()["detail"][0]["loc"] == ["body", "segments"],
+        response.text,
+    )
+
+    # The legacy allocation endpoint must remain fully usable after the new
+    # module landed (exact legacy body, no new fields).
+    response = post(payload)
+    check(
+        "legacy allocation endpoint still serves its exact response",
+        response.status_code == 200
+        and response.json()
+        == {
+            "meter_increment": "10.000",
+            "branch_total": "8.000",
+            "difference": "2.000",
+            "check_sum": "2.000",
+            "allocations": [
+                {"interval": "I1", "branch_total": "4.000", "allocated": "1.000"},
+                {"interval": "I2", "branch_total": "3.500", "allocated": "0.875"},
+                {"interval": "I3", "branch_total": "0.500", "allocated": "0.125"},
+            ],
+        },
+        response.text,
     )
 
     if FAILURES:

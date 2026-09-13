@@ -163,6 +163,85 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 `include_trace`（或显式 `false`）的请求与响应保持原有字段，不含
 `calculation_trace`。
 
+## 电表示值序列推导（量程翻转）
+
+园区采集系统只保存电表累计示值。电表走满量程后示值回零，下一次采样的原始
+示值反而小于上一次；结算员为每一对相邻采样点声明该段是普通递增
+（`normal`）还是量程翻转（`rollover`），系统逐段还原区间电量并给出整段
+合计。全程以 0.001 kWh 整数定点计算，结果可独立复算。
+
+`POST /api/v1/meter-sequences/derive`
+
+```json
+{
+  "meter_id": "M-001",
+  "range_max": "1000.000",
+  "samples": [
+    {"timestamp": "2026-09-01T00:00:00", "value": "990.500"},
+    {"timestamp": "2026-09-02T00:00:00", "value": "0.750"},
+    {"timestamp": "2026-09-03T00:00:00", "value": "11.000"}
+  ],
+  "segments": ["rollover", "normal"]
+}
+```
+
+- `meter_id`：电表编号（非空、非纯空白、不带前后空格）。
+- `range_max`：三位小数的量程上限（kWh），必须为正数；示值合法区间为
+  `[0.000, range_max]`。
+- `samples`：按时间严格递增排列的采样点（至少 2 个），每项含 ISO 8601
+  `timestamp` 与三位小数累计示值 `value`。
+- `segments`：每对相邻采样点一条段声明，长度必须恰好为
+  `len(samples) - 1`；`normal` 表示普通递增，`rollover` 表示量程翻转。
+
+响应（区间按起止时间排序，各值为三位小数字符串）：
+
+```json
+{
+  "meter_id": "M-001",
+  "range_max": "1000.000",
+  "intervals": [
+    {"index": 0,
+     "start_time": "2026-09-01T00:00:00", "end_time": "2026-09-02T00:00:00",
+     "start_value": "990.500", "end_value": "0.750",
+     "segment_type": "rollover", "energy": "10.250"},
+    {"index": 1,
+     "start_time": "2026-09-02T00:00:00", "end_time": "2026-09-03T00:00:00",
+     "start_value": "0.750", "end_value": "11.000",
+     "segment_type": "normal", "energy": "10.250"}
+  ],
+  "total_energy": "20.500"
+}
+```
+
+推导规则（全部换算为 0.001 kWh 的整数毫单位后再计算）：
+
+1. 普通段：`energy = end - start`（允许持平，电量为 `0.000`）。
+2. 翻转段：`energy = range_max - start + end`。
+3. 每个区间结果携带段类型 `segment_type`；`total_energy` 为各段整数电量
+   之和，逐段相加与合计必然一致。连续多次翻转按多段分别计算，整段合计
+   自动包含跨越的每个完整量程。
+
+边界示值：`0.000` 与恰好等于 `range_max` 的示值合法；例如普通段
+`0.000 → range_max` 电量为 `range_max`。翻转段要求严格下降，因此
+`range_max → 0.000` 这一退化翻转按公式给出 `0.000`。
+
+### 示值序列错误
+
+任何校验失败都整次请求拒绝，**不产生任何部分区间**，错误信封定位到具体
+采样点字段或段下标：
+
+| 场景 | type | loc |
+| --- | --- | --- |
+| 时间重复（相邻采样点时间相同） | `duplicate_timestamp` | `samples.<i>.timestamp` |
+| 时间逆序（后一采样点早于前一采样点） | `timestamp_not_ascending` | `samples.<i>.timestamp` |
+| 混用带时区/不带时区时间戳 | `timestamp_timezone_mismatch` | `samples.<i>.timestamp` |
+| 示值超出 `[0.000, range_max]`（含负值） | `reading_out_of_range` | `samples.<i>.value` |
+| 普通段却下降，或翻转段却上升/持平 | `segment_direction_mismatch` | `segments.<i>` |
+| 段声明数量不等于采样点数 − 1 | `segments_length_mismatch` | `segments` |
+| `range_max` 非正（≤ 0）或超过三位小数 | `value_error` | `range_max` |
+| 段类型不是 `normal`/`rollover` | `literal_error` | `segments.<i>` |
+| 未知字段、空采样点列表、空白 `meter_id` 等 | 与分摊接口一致的 422 | 定位到对应字段 |
+
 ## 分摊规则（定点最大余数法）
 
 1. 表差、电量全部换算为 0.001 kWh 的整数倍（milliunit）计算。
