@@ -92,6 +92,43 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
             )
         seen[key] = index
 
+    # fixed_adjustments is opt-in: merely omitting it preserves the legacy
+    # request and response shape, while an explicit empty list still asks for
+    # every branch adjustment to be labelled "calculated".
+    has_fixed_adjustments = "fixed_adjustments" in payload.model_fields_set
+    fixed_adjustments: dict[tuple[str, str], int] = {}
+    if has_fixed_adjustments:
+        if payload.detail_level != "branch":
+            raise ApiError(
+                422,
+                ["body", "fixed_adjustments"],
+                "fixed_adjustments requires detail_level='branch'",
+                "fixed_adjustments_requires_branch_detail",
+            )
+
+        fixed_seen: dict[tuple[str, str], int] = {}
+        for index, item in enumerate(payload.fixed_adjustments):
+            key = (item.branch, item.interval)
+            if key in fixed_seen:
+                raise ApiError(
+                    422,
+                    ["body", "fixed_adjustments", index],
+                    f"duplicate fixed adjustment for branch '{item.branch}' in "
+                    f"interval '{item.interval}' (first occurrence at index "
+                    f"{fixed_seen[key]})",
+                    "duplicate_fixed_adjustment",
+                )
+            if key not in seen:
+                raise ApiError(
+                    422,
+                    ["body", "fixed_adjustments", index],
+                    f"fixed adjustment must reference a reading in this request: "
+                    f"branch '{item.branch}', interval '{item.interval}'",
+                    "unknown_fixed_adjustment",
+                )
+            fixed_seen[key] = index
+            fixed_adjustments[key] = to_milliunits(item.adjustment)
+
     # Every branch must report exactly the same set of intervals.
     intervals_by_branch: dict[str, set[str]] = {}
     for reading in payload.readings:
@@ -112,21 +149,103 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                 "interval_set_mismatch",
             )
 
+    # Convert once; the same milliunit values are used for totals, weights,
+    # fixed adjustments, and branch-level adjusted energies.
+    energies_by_interval: dict[str, dict[str, int]] = {}
+    reading_energies: list[int] = []
+    for reading in payload.readings:
+        energy = to_milliunits(reading.energy)
+        reading_energies.append(energy)
+        energies_by_interval.setdefault(reading.interval, {})[reading.branch] = energy
+
     # Aggregate per interval: signed branch total, and weight = sum of the
     # absolute branch energies (cancelling +/- branches still weigh in).
     interval_totals, weights = summarize_intervals(
-        (reading.interval, to_milliunits(reading.energy))
-        for reading in payload.readings
+        (reading.interval, energy)
+        for reading, energy in zip(payload.readings, reading_energies)
     )
 
     meter_increment = to_milliunits(payload.meter.end) - to_milliunits(payload.meter.start)
     branch_total = sum(interval_totals.values())
     difference = meter_increment - branch_total
 
+    fixed_by_interval: dict[str, int] = {}
+    fixed_total = 0
+    if has_fixed_adjustments:
+        for index, item in enumerate(payload.fixed_adjustments):
+            amount = fixed_adjustments[(item.branch, item.interval)]
+            if amount != 0 and (
+                difference == 0 or (amount > 0) != (difference > 0)
+            ):
+                raise ApiError(
+                    422,
+                    ["body", "fixed_adjustments", index, "adjustment"],
+                    f"fixed adjustment {format_milliunits(amount)} has the "
+                    f"opposite sign from the meter difference "
+                    f"{format_milliunits(difference)}",
+                    "fixed_adjustment_sign_mismatch",
+                )
+
+        absolute_total = 0
+        for index, item in enumerate(payload.fixed_adjustments):
+            amount = fixed_adjustments[(item.branch, item.interval)]
+            absolute_total += abs(amount)
+            if absolute_total > abs(difference):
+                raise ApiError(
+                    422,
+                    ["body", "fixed_adjustments", index, "adjustment"],
+                    f"absolute fixed adjustments total "
+                    f"{format_milliunits(absolute_total)} exceeds meter "
+                    f"difference magnitude {format_milliunits(abs(difference))}",
+                    "fixed_adjustment_total_exceeds_difference",
+                )
+            fixed_by_interval[item.interval] = (
+                fixed_by_interval.get(item.interval, 0) + amount
+            )
+            fixed_total += amount
+
+        unlocked_weights: dict[str, int] = {interval: 0 for interval in weights}
+        first_unlocked_reading: int | None = None
+        for index, reading in enumerate(payload.readings):
+            key = (reading.branch, reading.interval)
+            if key in fixed_adjustments:
+                continue
+            if first_unlocked_reading is None:
+                first_unlocked_reading = index
+            unlocked_weights[reading.interval] += abs(reading_energies[index])
+
+        residual_difference = difference - fixed_total
+        if residual_difference != 0 and sum(unlocked_weights.values()) <= 0:
+            if first_unlocked_reading is not None:
+                loc = ["body", "readings", first_unlocked_reading]
+            else:
+                loc = ["body", "fixed_adjustments", 0]
+            raise ApiError(
+                422,
+                loc,
+                "a non-zero residual remains after fixed adjustments but every "
+                "unlocked reading has zero absolute energy",
+                "zero_unlocked_weight",
+            )
+    else:
+        unlocked_weights = weights
+        residual_difference = difference
+
     try:
-        allocation = allocate_difference(difference, weights)
+        residual_allocation = allocate_difference(residual_difference, unlocked_weights)
     except ZeroTotalWeightError as exc:
-        raise ApiError(422, ["body", "readings"], str(exc), "zero_total_weight") from exc
+        error_type = (
+            "zero_unlocked_weight" if has_fixed_adjustments else "zero_total_weight"
+        )
+        raise ApiError(422, ["body", "readings"], str(exc), error_type) from exc
+
+    if fixed_adjustments:
+        allocation = {
+            interval: residual_allocation[interval] + fixed_by_interval.get(interval, 0)
+            for interval in interval_totals
+        }
+    else:
+        allocation = residual_allocation
 
     check_sum = sum(allocation.values())
     if check_sum != difference:  # internal invariant, can never trigger
@@ -134,20 +253,35 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
 
     # Second level only when requested: per interval, spread its allocated
     # share across branches proportionally to absolute branch energy.
-    energies_by_interval: dict[str, dict[str, int]] | None = None
-    if payload.detail_level == "branch":
-        energies_by_interval = {}
-        for reading in payload.readings:
-            energies_by_interval.setdefault(reading.interval, {})[reading.branch] = (
-                to_milliunits(reading.energy)
-            )
+    show_branch_allocations = (
+        payload.detail_level == "branch" or has_fixed_adjustments
+    )
 
     allocations = []
     for interval in sorted(interval_totals):
         branch_allocations = None
-        if energies_by_interval is not None:
+        if show_branch_allocations:
             energies = energies_by_interval[interval]
-            adjustments = allocate_to_branches(allocation[interval], energies)
+            if fixed_adjustments:
+                unlocked_energies = {
+                    branch: energy
+                    for branch, energy in energies.items()
+                    if (branch, interval) not in fixed_adjustments
+                }
+                calculated_adjustments = allocate_to_branches(
+                    residual_allocation[interval], unlocked_energies
+                )
+                adjustments = {
+                    branch: (
+                        fixed_adjustments[(branch, interval)]
+                        if (branch, interval) in fixed_adjustments
+                        else calculated_adjustments[branch]
+                    )
+                    for branch in energies
+                }
+            else:
+                adjustments = allocate_to_branches(allocation[interval], energies)
+
             branch_allocations = [
                 BranchAllocation(
                     branch=branch,
@@ -156,6 +290,13 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                     adjusted_energy=format_milliunits(
                         energies[branch] + adjustments[branch]
                     ),
+                    source=(
+                        "fixed"
+                        if (branch, interval) in fixed_adjustments
+                        else "calculated"
+                    )
+                    if has_fixed_adjustments
+                    else None,
                 )
                 for branch in sorted(energies)
             ]

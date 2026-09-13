@@ -89,6 +89,16 @@ class BranchReading(BaseModel):
     energy: MilliDecimal
 
 
+class FixedAdjustment(BaseModel):
+    """A settlement clerk's confirmed adjustment for one existing reading."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    branch: NonBlankStr = Field(min_length=1)
+    interval: NonBlankStr = Field(min_length=1)
+    adjustment: MilliDecimal
+
+
 class SettlementRequest(BaseModel):
     # Unknown top-level fields (e.g. a misspelled "detail_level") must be
     # rejected instead of silently falling back to interval-level results.
@@ -100,6 +110,10 @@ class SettlementRequest(BaseModel):
     # per-branch breakdown to every interval. Anything else is a 422 whose
     # loc points at this field.
     detail_level: Literal["interval", "branch"] = "interval"
+    # When omitted, responses remain byte-for-byte compatible with the legacy
+    # API. An explicit list requires detail_level="branch" and marks each
+    # branch adjustment as "fixed" or "calculated".
+    fixed_adjustments: list[FixedAdjustment] = Field(default_factory=list)
 
 
 class BranchAllocation(BaseModel):
@@ -109,6 +123,9 @@ class BranchAllocation(BaseModel):
     energy: str
     adjustment: str
     adjusted_energy: str
+    # Present only when fixed_adjustments was explicitly supplied; omitted for
+    # legacy requests so their branch-allocation objects keep their old shape.
+    source: Literal["fixed", "calculated"] | None = None
 
 
 class IntervalAllocation(BaseModel):

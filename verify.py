@@ -262,7 +262,73 @@ def main() -> int:
             response.text,
         )
 
-    # 8. Invalid detail_level is rejected with loc on that field and no
+    # 8. A clerk-confirmed branch adjustment is locked out of proportional
+    #    allocation; the remaining difference is split among unlocked readings
+    #    and every branch row records whether its source is fixed/calculated.
+    fixed_payload = {
+        **payload,
+        "detail_level": "branch",
+        "fixed_adjustments": [
+            {"branch": "B2", "interval": "I1", "adjustment": "0.500"}
+        ],
+    }
+    response = post(fixed_payload)
+    check("fixed adjustment settlement returns 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        check(
+            "fixed settlement recomputes exact final branch details",
+            response.json()
+            == {
+                "meter_increment": "10.000",
+                "branch_total": "8.000",
+                "difference": "2.000",
+                "check_sum": "2.000",
+                "allocations": [
+                    {
+                        "interval": "I1",
+                        "branch_total": "4.000",
+                        "allocated": "1.143",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "3.000",
+                             "adjustment": "0.643", "adjusted_energy": "3.643",
+                             "source": "calculated"},
+                            {"branch": "B2", "energy": "1.000",
+                             "adjustment": "0.500", "adjusted_energy": "1.500",
+                             "source": "fixed"},
+                        ],
+                    },
+                    {
+                        "interval": "I2",
+                        "branch_total": "3.500",
+                        "allocated": "0.750",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "2.000",
+                             "adjustment": "0.429", "adjusted_energy": "2.429",
+                             "source": "calculated"},
+                            {"branch": "B2", "energy": "1.500",
+                             "adjustment": "0.321", "adjusted_energy": "1.821",
+                             "source": "calculated"},
+                        ],
+                    },
+                    {
+                        "interval": "I3",
+                        "branch_total": "0.500",
+                        "allocated": "0.107",
+                        "branch_allocations": [
+                            {"branch": "B1", "energy": "0.500",
+                             "adjustment": "0.107", "adjusted_energy": "0.607",
+                             "source": "calculated"},
+                            {"branch": "B2", "energy": "0.000",
+                             "adjustment": "0.000", "adjusted_energy": "0.000",
+                             "source": "calculated"},
+                        ],
+                    },
+                ],
+            },
+            response.text,
+        )
+
+    # 9. Invalid detail_level is rejected with loc on that field and no
     #    partial results; omitting it (or "interval") keeps the legacy shape.
     invalid_level = post({**payload, "detail_level": "daily"})
     check(
@@ -286,7 +352,7 @@ def main() -> int:
         legacy.text,
     )
 
-    # 9. Rejections carry field-locatable errors and no partial results.
+    # 10. Rejections carry field-locatable errors and no partial results.
     backwards = post({"meter": {"start": "5.000", "end": "4.000"},
                       "readings": [{"branch": "B1", "interval": "I1", "energy": "0.000"}]})
     check(
