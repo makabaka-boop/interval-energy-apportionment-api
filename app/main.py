@@ -8,15 +8,18 @@ from fastapi.responses import JSONResponse
 
 from .allocation import (
     ZeroTotalWeightError,
-    allocate_difference,
-    allocate_to_branches,
+    allocate_difference_traced,
+    allocate_to_branches_traced,
     format_milliunits,
     summarize_intervals,
     to_milliunits,
 )
 from .schemas import (
     BranchAllocation,
+    BranchCalculationTrace,
+    CalculationTrace,
     IntervalAllocation,
+    IntervalCalculationTrace,
     SettlementRequest,
     SettlementResponse,
 )
@@ -91,6 +94,16 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                 "duplicate_reading",
             )
         seen[key] = index
+
+    # The audit trail breaks every interval down to its branches, so it only
+    # exists alongside the per-branch detail view.
+    if payload.include_trace and payload.detail_level != "branch":
+        raise ApiError(
+            422,
+            ["body", "include_trace"],
+            "include_trace requires detail_level='branch'",
+            "include_trace_requires_branch_detail",
+        )
 
     # fixed_adjustments is opt-in: merely omitting it preserves the legacy
     # request and response shape, while an explicit empty list still asks for
@@ -232,7 +245,9 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
         residual_difference = difference
 
     try:
-        residual_allocation = allocate_difference(residual_difference, unlocked_weights)
+        residual_allocation, interval_calc = allocate_difference_traced(
+            residual_difference, unlocked_weights
+        )
     except ZeroTotalWeightError as exc:
         error_type = (
             "zero_unlocked_weight" if has_fixed_adjustments else "zero_total_weight"
@@ -258,8 +273,10 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
     )
 
     allocations = []
+    traced_intervals: list[IntervalCalculationTrace] = []
     for interval in sorted(interval_totals):
         branch_allocations = None
+        branch_traces: list[BranchCalculationTrace] = []
         if show_branch_allocations:
             energies = energies_by_interval[interval]
             if fixed_adjustments:
@@ -268,7 +285,7 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                     for branch, energy in energies.items()
                     if (branch, interval) not in fixed_adjustments
                 }
-                calculated_adjustments = allocate_to_branches(
+                calculated_adjustments, branch_calc = allocate_to_branches_traced(
                     residual_allocation[interval], unlocked_energies
                 )
                 adjustments = {
@@ -280,7 +297,27 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                     for branch in energies
                 }
             else:
-                adjustments = allocate_to_branches(allocation[interval], energies)
+                adjustments, branch_calc = allocate_to_branches_traced(
+                    allocation[interval], energies
+                )
+
+            if payload.include_trace:
+                # Only calculated (unlocked) branches appear here; locked ones
+                # are not residual-calculation items and stay visible through
+                # the interval's fixed_total below.
+                branch_traces = [
+                    BranchCalculationTrace(
+                        branch=branch,
+                        weight=format_milliunits(branch_calc[branch].weight),
+                        truncated_share=format_milliunits(
+                            branch_calc[branch].truncated_share
+                        ),
+                        remainder=branch_calc[branch].remainder,
+                        leftover_units=branch_calc[branch].leftover_units,
+                        adjustment=format_milliunits(branch_calc[branch].share),
+                    )
+                    for branch in sorted(branch_calc)
+                ]
 
             branch_allocations = [
                 BranchAllocation(
@@ -308,10 +345,38 @@ def allocate_settlement(payload: SettlementRequest) -> SettlementResponse:
                 branch_allocations=branch_allocations,
             )
         )
+        if payload.include_trace:
+            entry = interval_calc[interval]
+            traced_intervals.append(
+                IntervalCalculationTrace(
+                    interval=interval,
+                    weight=format_milliunits(entry.weight),
+                    truncated_share=format_milliunits(entry.truncated_share),
+                    remainder=entry.remainder,
+                    leftover_units=entry.leftover_units,
+                    residual_allocated=format_milliunits(
+                        residual_allocation[interval]
+                    ),
+                    fixed_total=format_milliunits(
+                        fixed_by_interval.get(interval, 0)
+                    ),
+                    allocated=format_milliunits(allocation[interval]),
+                    branches=branch_traces,
+                )
+            )
+    calculation_trace = None
+    if payload.include_trace:
+        calculation_trace = CalculationTrace(
+            difference=format_milliunits(difference),
+            fixed_total=format_milliunits(fixed_total),
+            residual_difference=format_milliunits(residual_difference),
+            intervals=traced_intervals,
+        )
     return SettlementResponse(
         meter_increment=format_milliunits(meter_increment),
         branch_total=format_milliunits(branch_total),
         difference=format_milliunits(difference),
         check_sum=format_milliunits(check_sum),
         allocations=allocations,
+        calculation_trace=calculation_trace,
     )

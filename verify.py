@@ -399,6 +399,217 @@ def main() -> int:
         zero_weight.text,
     )
 
+    # 11. Calculation trace: difference 0.007 over interval weights 5/3/2
+    #     leaves one milliunit to place; the trace must record every weight,
+    #     truncated share, remainder and leftover unit exactly as computed.
+    trace_payload = {
+        "detail_level": "branch",
+        "include_trace": True,
+        "meter": {"start": "0.000", "end": "0.017"},
+        "readings": [
+            {"branch": "B1", "interval": "I1", "energy": "0.003"},
+            {"branch": "B2", "interval": "I1", "energy": "0.002"},
+            {"branch": "B1", "interval": "I2", "energy": "0.003"},
+            {"branch": "B2", "interval": "I2", "energy": "0.000"},
+            {"branch": "B1", "interval": "I3", "energy": "0.002"},
+            {"branch": "B2", "interval": "I3", "energy": "0.000"},
+        ],
+    }
+    response = post(trace_payload)
+    check("traced settlement returns 200", response.status_code == 200, response.text)
+    if response.status_code == 200:
+        check(
+            "trace records exact positive-difference remainder fill-in",
+            response.json()
+            == {
+                "meter_increment": "0.017",
+                "branch_total": "0.010",
+                "difference": "0.007",
+                "check_sum": "0.007",
+                "allocations": [
+                    {"interval": "I1", "branch_total": "0.005", "allocated": "0.004",
+                     "branch_allocations": [
+                         {"branch": "B1", "energy": "0.003", "adjustment": "0.002",
+                          "adjusted_energy": "0.005"},
+                         {"branch": "B2", "energy": "0.002", "adjustment": "0.002",
+                          "adjusted_energy": "0.004"},
+                     ]},
+                    {"interval": "I2", "branch_total": "0.003", "allocated": "0.002",
+                     "branch_allocations": [
+                         {"branch": "B1", "energy": "0.003", "adjustment": "0.002",
+                          "adjusted_energy": "0.005"},
+                         {"branch": "B2", "energy": "0.000", "adjustment": "0.000",
+                          "adjusted_energy": "0.000"},
+                     ]},
+                    {"interval": "I3", "branch_total": "0.002", "allocated": "0.001",
+                     "branch_allocations": [
+                         {"branch": "B1", "energy": "0.002", "adjustment": "0.001",
+                          "adjusted_energy": "0.003"},
+                         {"branch": "B2", "energy": "0.000", "adjustment": "0.000",
+                          "adjusted_energy": "0.000"},
+                     ]},
+                ],
+                "calculation_trace": {
+                    "difference": "0.007",
+                    "fixed_total": "0.000",
+                    "residual_difference": "0.007",
+                    "intervals": [
+                        {"interval": "I1", "weight": "0.005",
+                         "truncated_share": "0.003", "remainder": 5,
+                         "leftover_units": 1, "residual_allocated": "0.004",
+                         "fixed_total": "0.000", "allocated": "0.004",
+                         "branches": [
+                             {"branch": "B1", "weight": "0.003",
+                              "truncated_share": "0.002", "remainder": 2,
+                              "leftover_units": 0, "adjustment": "0.002"},
+                             {"branch": "B2", "weight": "0.002",
+                              "truncated_share": "0.001", "remainder": 3,
+                              "leftover_units": 1, "adjustment": "0.002"},
+                         ]},
+                        {"interval": "I2", "weight": "0.003",
+                         "truncated_share": "0.002", "remainder": 1,
+                         "leftover_units": 0, "residual_allocated": "0.002",
+                         "fixed_total": "0.000", "allocated": "0.002",
+                         "branches": [
+                             {"branch": "B1", "weight": "0.003",
+                              "truncated_share": "0.002", "remainder": 0,
+                              "leftover_units": 0, "adjustment": "0.002"},
+                             {"branch": "B2", "weight": "0.000",
+                              "truncated_share": "0.000", "remainder": 0,
+                              "leftover_units": 0, "adjustment": "0.000"},
+                         ]},
+                        {"interval": "I3", "weight": "0.002",
+                         "truncated_share": "0.001", "remainder": 4,
+                         "leftover_units": 0, "residual_allocated": "0.001",
+                         "fixed_total": "0.000", "allocated": "0.001",
+                         "branches": [
+                             {"branch": "B1", "weight": "0.002",
+                              "truncated_share": "0.001", "remainder": 0,
+                              "leftover_units": 0, "adjustment": "0.001"},
+                             {"branch": "B2", "weight": "0.000",
+                              "truncated_share": "0.000", "remainder": 0,
+                              "leftover_units": 0, "adjustment": "0.000"},
+                         ]},
+                    ],
+                },
+            },
+            response.text,
+        )
+
+    # 12. Negative difference: the trace records the same remainder ranking
+    #     handing out negative milliunits.
+    negative_trace_payload = {**trace_payload, "meter": {"start": "0.000", "end": "0.003"}}
+    response = post(negative_trace_payload)
+    check(
+        "traced negative settlement returns 200",
+        response.status_code == 200,
+        response.text,
+    )
+    if response.status_code == 200:
+        body = response.json()
+        check(
+            "trace records negative leftover units in the same order",
+            body["difference"] == "-0.007"
+            and body["check_sum"] == "-0.007"
+            and body["calculation_trace"]["intervals"][0]
+            == {
+                "interval": "I1",
+                "weight": "0.005",
+                "truncated_share": "-0.003",
+                "remainder": 5,
+                "leftover_units": -1,
+                "residual_allocated": "-0.004",
+                "fixed_total": "0.000",
+                "allocated": "-0.004",
+                "branches": [
+                    {"branch": "B1", "weight": "0.003",
+                     "truncated_share": "-0.002", "remainder": 2,
+                     "leftover_units": 0, "adjustment": "-0.002"},
+                    {"branch": "B2", "weight": "0.002",
+                     "truncated_share": "-0.001", "remainder": 3,
+                     "leftover_units": -1, "adjustment": "-0.002"},
+                ],
+            },
+            response.text,
+        )
+
+    # 13. Trace with locked adjustments: only the residual difference is
+    #     explained per calculation item, while each interval keeps its locked
+    #     contribution (residual_allocated + fixed_total == allocated).
+    response = post({**fixed_payload, "include_trace": True})
+    check(
+        "traced fixed settlement returns 200",
+        response.status_code == 200,
+        response.text,
+    )
+    if response.status_code == 200:
+        body = response.json()
+        check(
+            "trace explains residual chain and keeps locked contributions",
+            body["calculation_trace"]
+            == {
+                "difference": "2.000",
+                "fixed_total": "0.500",
+                "residual_difference": "1.500",
+                "intervals": [
+                    {"interval": "I1", "weight": "3.000",
+                     "truncated_share": "0.642", "remainder": 6000,
+                     "leftover_units": 1, "residual_allocated": "0.643",
+                     "fixed_total": "0.500", "allocated": "1.143",
+                     "branches": [
+                         {"branch": "B1", "weight": "3.000",
+                          "truncated_share": "0.643", "remainder": 0,
+                          "leftover_units": 0, "adjustment": "0.643"},
+                     ]},
+                    {"interval": "I2", "weight": "3.500",
+                     "truncated_share": "0.750", "remainder": 0,
+                     "leftover_units": 0, "residual_allocated": "0.750",
+                     "fixed_total": "0.000", "allocated": "0.750",
+                     "branches": [
+                         {"branch": "B1", "weight": "2.000",
+                          "truncated_share": "0.428", "remainder": 2000,
+                          "leftover_units": 1, "adjustment": "0.429"},
+                         {"branch": "B2", "weight": "1.500",
+                          "truncated_share": "0.321", "remainder": 1500,
+                          "leftover_units": 0, "adjustment": "0.321"},
+                     ]},
+                    {"interval": "I3", "weight": "0.500",
+                     "truncated_share": "0.107", "remainder": 1000,
+                     "leftover_units": 0, "residual_allocated": "0.107",
+                     "fixed_total": "0.000", "allocated": "0.107",
+                     "branches": [
+                         {"branch": "B1", "weight": "0.500",
+                          "truncated_share": "0.107", "remainder": 0,
+                          "leftover_units": 0, "adjustment": "0.107"},
+                         {"branch": "B2", "weight": "0.000",
+                          "truncated_share": "0.000", "remainder": 0,
+                          "leftover_units": 0, "adjustment": "0.000"},
+                     ]},
+                ],
+            },
+            response.text,
+        )
+
+    # 14. include_trace without branch detail is rejected with loc on
+    #     include_trace and no partial results; requests that omit it never
+    #     grow a calculation_trace field.
+    traced_without_detail = post({**payload, "include_trace": True})
+    check(
+        "include_trace without branch detail rejected with loc on include_trace",
+        traced_without_detail.status_code == 422
+        and set(traced_without_detail.json().keys()) == {"detail"}
+        and "include_trace" in traced_without_detail.json()["detail"][0]["loc"],
+        traced_without_detail.text,
+    )
+
+    untraced_branch = post({**payload, "detail_level": "branch"})
+    check(
+        "requests without include_trace add no calculation_trace field",
+        untraced_branch.status_code == 200
+        and "calculation_trace" not in untraced_branch.json(),
+        untraced_branch.text,
+    )
+
     if FAILURES:
         print(f"\n{len(FAILURES)} acceptance check(s) failed: {FAILURES}")
         return 1

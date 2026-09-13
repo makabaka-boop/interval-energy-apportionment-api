@@ -117,6 +117,52 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 支路均标记为 `calculated`。完全不传 `fixed_adjustments` 时，即使
 `detail_level` 为 `branch`，请求与响应也继续保持原有字段，不出现 `source`。
 
+### 可选的计算跟踪（include_trace）
+
+月底复核表差时，结算员需要向财务说明每个最小单位为何落到某个区间和支路。
+在 `detail_level: "branch"` 的请求中附加 `"include_trace": true`，响应会
+追加 `calculation_trace`，把正式分摊所用的定点最大余数计算过程完整列出：
+
+```json
+"calculation_trace": {
+  "difference": "2.000",
+  "fixed_total": "0.500",
+  "residual_difference": "1.500",
+  "intervals": [
+    {"interval": "I1", "weight": "3.000", "truncated_share": "0.642",
+     "remainder": 6000, "leftover_units": 1,
+     "residual_allocated": "0.643", "fixed_total": "0.500", "allocated": "1.143",
+     "branches": [
+       {"branch": "B1", "weight": "3.000", "truncated_share": "0.643",
+        "remainder": 0, "leftover_units": 0, "adjustment": "0.643"}
+     ]}
+  ]
+}
+```
+
+- 顶层：`difference`（原表差）、`fixed_total`（锁定合计）、
+  `residual_difference`（待分余量 = 原表差 − 锁定合计）。
+- 每个区间（顺序与 `allocations` 一致）：`weight`（参与余量分配的权重）、
+  `truncated_share`（向零截断份额）、`remainder`（最大余数排序用的定点
+  余数，内部整数）、`leftover_units`（最终补入的最小单位数，±1 或 0，
+  负表差补负单位）、`residual_allocated`（余量分摊结果）、
+  `fixed_total`（本区间锁定调整合计）、`allocated`（区间最终结果 =
+  余量分摊 + 锁定合计）。
+- 每个参与计算的支路（顺序与 `branch_allocations` 一致）：同样的权重、
+  截断份额、余数、补入单位，以及最终 `adjustment`。
+
+跟踪数据直接取自正式分摊的同一次定点计算，二者不会互相偏离。使用
+`fixed_adjustments` 时，跟踪只解释剩余表差的计算项（锁定支路不进入权重
+与支路跟踪），但区间层面仍保留锁定项对最终结果的贡献。复算链路：
+`difference = fixed_total + residual_difference`，且每区间
+`allocated = residual_allocated + fixed_total`、
+`residual_allocated = truncated_share + leftover_units × 0.001`。
+
+未选择支路明细却传 `include_trace: true` 时，返回定位到 `include_trace`
+的 422；任何校验或分摊失败都只返回错误信封，不返回半成品跟踪数据。未传
+`include_trace`（或显式 `false`）的请求与响应保持原有字段，不含
+`calculation_trace`。
+
 ## 分摊规则（定点最大余数法）
 
 1. 表差、电量全部换算为 0.001 kWh 的整数倍（milliunit）计算。
@@ -150,3 +196,4 @@ python verify.py       # 对运行中的 API 做验收（API_BASE_URL 可覆盖�
 | 锁定项重复，或未引用本次请求中的支路/区间读数 | `duplicate_fixed_adjustment` / `unknown_fixed_adjustment`（422，loc 含锁定项下标） |
 | 锁定调整与表差方向不一致，或绝对值合计超过表差 | `fixed_adjustment_sign_mismatch` / `fixed_adjustment_total_exceeds_difference`（422，loc 定位到具体 `adjustment`） |
 | 扣除锁定项后余量非零，但未锁定读数绝对电量合计为零 | `zero_unlocked_weight`（422，loc 定位到具体锁定项或读数） |
+| 传入 `include_trace: true` 但未使用 `detail_level: "branch"` | `include_trace_requires_branch_detail`（422，loc 定位到 `include_trace`） |

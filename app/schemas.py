@@ -114,6 +114,10 @@ class SettlementRequest(BaseModel):
     # API. An explicit list requires detail_level="branch" and marks each
     # branch adjustment as "fixed" or "calculated".
     fixed_adjustments: list[FixedAdjustment] = Field(default_factory=list)
+    # Opt-in audit trail: requires detail_level="branch" and appends
+    # calculation_trace to the response. Omitted/false keeps the response
+    # field-for-field identical to the untraced shape.
+    include_trace: bool = False
 
 
 class BranchAllocation(BaseModel):
@@ -137,9 +141,65 @@ class IntervalAllocation(BaseModel):
     branch_allocations: list[BranchAllocation] | None = None
 
 
+class BranchCalculationTrace(BaseModel):
+    """One unlocked branch's second-level calculation record.
+
+    ``weight``/``truncated_share``/``adjustment`` are kWh strings; ``remainder``
+    is the raw fixed-point remainder used to rank leftover hand-outs and
+    ``leftover_units`` the signed count of 0.001 kWh units this branch received
+    in that pass.
+    """
+
+    branch: str
+    weight: str
+    truncated_share: str
+    remainder: int
+    leftover_units: int
+    adjustment: str
+
+
+class IntervalCalculationTrace(BaseModel):
+    """One interval's first-level calculation record plus its branch records.
+
+    With fixed_adjustments, ``weight``/``truncated_share``/``remainder``/
+    ``leftover_units``/``residual_allocated`` describe only the residual
+    difference split among unlocked readings, while ``fixed_total`` keeps the
+    locked adjustments' contribution and ``allocated`` is the interval's final
+    result (``residual_allocated + fixed_total``).
+    """
+
+    interval: str
+    weight: str
+    truncated_share: str
+    remainder: int
+    leftover_units: int
+    residual_allocated: str
+    fixed_total: str
+    allocated: str
+    branches: list[BranchCalculationTrace]
+
+
+class CalculationTrace(BaseModel):
+    """Audit trail of the fixed-point largest-remainder computation.
+
+    ``difference`` is the original meter difference, ``fixed_total`` the sum of
+    locked adjustments and ``residual_difference`` the remainder that was
+    actually allocated (``difference - fixed_total``). ``intervals`` follows
+    the same ordering as the response's ``allocations``.
+    """
+
+    difference: str
+    fixed_total: str
+    residual_difference: str
+    intervals: list[IntervalCalculationTrace]
+
+
 class SettlementResponse(BaseModel):
     meter_increment: str
     branch_total: str
     difference: str
     check_sum: str
     allocations: list[IntervalAllocation]
+    # Present only when the request asked for include_trace=true; omitted
+    # otherwise so untraced responses keep their exact original fields.
+    calculation_trace: CalculationTrace | None = None

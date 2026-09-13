@@ -7,6 +7,7 @@ so the smallest unit can never be lost to rounding.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
 
@@ -15,6 +16,31 @@ MILLIUNITS_PER_KWH = 1000
 
 class ZeroTotalWeightError(Exception):
     """Raised when the difference is non-zero but every interval weight is zero."""
+
+
+@dataclass(frozen=True)
+class AllocationTraceEntry:
+    """One key's calculation record inside a largest-remainder allocation.
+
+    All quantities are the exact integers used by the fixed-point computation:
+
+    * ``weight``: the key's absolute-energy weight in milliunits;
+    * ``truncated_share``: the share after toward-zero truncation, in
+      milliunits;
+    * ``remainder``: the fixed-point remainder that ranked the key when the
+      leftover milliunits were handed out;
+    * ``leftover_units``: signed milliunits added to this key in the leftover
+      pass (``+1``/``-1``/``0``; negative differences hand out negative units);
+    * ``share``: the final allocated share in milliunits
+      (``truncated_share + leftover_units``).
+    """
+
+    key: str
+    weight: int
+    truncated_share: int
+    remainder: int
+    leftover_units: int
+    share: int
 
 
 def summarize_intervals(
@@ -62,8 +88,33 @@ def allocate_difference(difference: int, weights: dict[str, int]) -> dict[str, i
     Raises :class:`ZeroTotalWeightError` if the difference is non-zero while
     the total weight is zero.
     """
+    shares, _ = allocate_difference_traced(difference, weights)
+    return shares
+
+
+def allocate_difference_traced(
+    difference: int, weights: dict[str, int]
+) -> tuple[dict[str, int], dict[str, AllocationTraceEntry]]:
+    """Same allocation as :func:`allocate_difference`, plus the audit trail.
+
+    Returns ``(shares, trace)`` where ``trace`` maps each key to the
+    :class:`AllocationTraceEntry` recorded while computing its share, so the
+    trace can never diverge from the allocation it explains.
+    """
     if difference == 0:
-        return {interval: 0 for interval in weights}
+        shares = {interval: 0 for interval in weights}
+        trace = {
+            interval: AllocationTraceEntry(
+                key=interval,
+                weight=weight,
+                truncated_share=0,
+                remainder=0,
+                leftover_units=0,
+                share=0,
+            )
+            for interval, weight in weights.items()
+        }
+        return shares, trace
 
     total_weight = sum(weights.values())
     if total_weight <= 0:
@@ -73,21 +124,36 @@ def allocate_difference(difference: int, weights: dict[str, int]) -> dict[str, i
         )
 
     sign = 1 if difference > 0 else -1
-    shares: dict[str, int] = {}
+    truncated: dict[str, int] = {}
     remainders: dict[str, int] = {}
     truncated_sum = 0
     for interval, weight in weights.items():
         magnitude = abs(difference) * weight
         quotient, remainder = divmod(magnitude, total_weight)
-        shares[interval] = sign * quotient
+        truncated[interval] = sign * quotient
         remainders[interval] = remainder
         truncated_sum += sign * quotient
 
+    shares = dict(truncated)
     leftover = abs(difference - truncated_sum)
     order = sorted(weights, key=lambda interval: (-remainders[interval], interval))
+    leftover_units = {interval: 0 for interval in weights}
     for interval in order[:leftover]:
         shares[interval] += sign
-    return shares
+        leftover_units[interval] = sign
+
+    trace = {
+        interval: AllocationTraceEntry(
+            key=interval,
+            weight=weights[interval],
+            truncated_share=truncated[interval],
+            remainder=remainders[interval],
+            leftover_units=leftover_units[interval],
+            share=shares[interval],
+        )
+        for interval in weights
+    }
+    return shares, trace
 
 
 def allocate_to_branches(allocated: int, branch_energies: dict[str, int]) -> dict[str, int]:
@@ -101,5 +167,14 @@ def allocate_to_branches(allocated: int, branch_energies: dict[str, int]) -> dic
     weight, so at least one branch weight is positive and
     :class:`ZeroTotalWeightError` cannot occur here.
     """
+    shares, _ = allocate_to_branches_traced(allocated, branch_energies)
+    return shares
+
+
+def allocate_to_branches_traced(
+    allocated: int, branch_energies: dict[str, int]
+) -> tuple[dict[str, int], dict[str, AllocationTraceEntry]]:
+    """Same second-level allocation as :func:`allocate_to_branches`, plus the
+    per-branch calculation records behind it."""
     weights = {branch: abs(energy) for branch, energy in branch_energies.items()}
-    return allocate_difference(allocated, weights)
+    return allocate_difference_traced(allocated, weights)
